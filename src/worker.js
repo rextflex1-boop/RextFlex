@@ -583,8 +583,8 @@ async function rateLimit(env, uid, name, perMinute) {
 }
 
 /** Finds documents. parentPath null = top-level collection. Each row has path (full name) and id. */
-async function fsFind(env, parentPath, collectionId, filters = [], limit = 1000) {
-  const structuredQuery = { from: [{ collectionId }], limit };
+async function fsFind(env, parentPath, collectionId, filters = [], limit = 1000, allDescendants = false) {
+  const structuredQuery = { from: [{ collectionId, allDescendants }], limit };
   const parts = filters.map((f) => ({
     fieldFilter: { field: { fieldPath: f.field }, op: f.op, value: toFsValue(f.value) },
   }));
@@ -712,10 +712,12 @@ async function cleanupExpired(env) {
     const msgs = await fsFind(env, `sharedChats/${s.id}`, "messages", []);
     await fsDeleteAll(env, [...msgs.map((m) => m.path), s.path]);
   }
+  const expired = await fsFind(env, null, "messages", [{ field: "expiresAt", op: "LESS_THAN", value: now.getTime() }], 1000, true);
+  await fsDeleteAll(env, expired.map((m) => m.path));
   const cutoff = dayKey(new Date(now.getTime() - 2 * 86400000));
   const quotas = await fsFind(env, null, "quotas", [{ field: "day", op: "LESS_THAN", value: cutoff }]);
   await fsDeleteAll(env, quotas.map((q) => q.path));
-  return { sharesRemoved: shares.length, quotasRemoved: quotas.length };
+  return { sharesRemoved: shares.length, quotasRemoved: quotas.length, messagesRemoved: expired.length };
 }
 
 export { cleanupExpired };
@@ -768,7 +770,8 @@ async function notifyPush(request, env) {
     if (!msg || msg.senderUid !== uid) throw new HttpError(403, "Ye message aapka nahi hai");
     receivers = chat.participants.filter((p) => p !== uid);
     const sender = await fsGet(env, `users/${uid}`);
-    payload = { type: "message", title: `@${(sender && sender.username) || "user"}`, body: previewOf(msg), chatKey: id, lockKey: `u_${uid}` };
+    urgent = true;
+    payload = { type: "message", title: `@${(sender && sender.username) || "user"}`, body: previewOf(msg), chatKey: id, lockKey: `u_${uid}`, chatId: id, messageId };
   } else if (kind === "group") {
     if (!id || !messageId) throw new HttpError(400, "id aur messageId chahiye");
     const group = await fsGet(env, `groups/${id}`);
@@ -776,6 +779,7 @@ async function notifyPush(request, env) {
     const msg = await fsGet(env, `groups/${id}/messages/${messageId}`);
     if (!msg || msg.senderUid !== uid) throw new HttpError(403, "Ye message aapka nahi hai");
     receivers = group.members.filter((p) => p !== uid);
+    urgent = true;
     payload = {
       type: "message",
       title: `${group.name || "Group"} · @${String(msg.senderUsername || "user").slice(0, 40)}`,
@@ -794,8 +798,22 @@ async function notifyPush(request, env) {
       callerUsername: String(call.callerUsername || "user").slice(0, 40),
       callType: String(call.type || "audio"),
     };
+  } else if (kind === "groupcall") {
+    if (!id) throw new HttpError(400, "group call id chahiye");
+    const call = await fsGet(env, `groupCalls/${id}`);
+    if (!call || call.starterUid !== uid || call.status !== "active") throw new HttpError(403, "Ye group call aapki nahi hai");
+    if (Date.now() - (call.createdAtMs || 0) > 60000) throw new HttpError(403, "Ye group call purani ho chuki hai");
+    receivers = (call.members || []).filter((p) => p !== uid);
+    urgent = true;
+    const kindLabel = call.type === "video" ? "Video call" : call.type === "screenshare" ? "Screen share call" : "Audio call";
+    payload = {
+      type: "group_call",
+      title: `${String(call.groupName || "Group").slice(0, 60)} · @${String(call.starterUsername || "user").slice(0, 40)}`,
+      body: `${kindLabel} shuru hui. Join karo.`,
+      chatKey: `gc_${id}`,
+    };
   } else {
-    throw new HttpError(400, "kind 'chat', 'group' ya 'call' hona chahiye");
+    throw new HttpError(400, "kind 'chat', 'group', 'call' ya 'groupcall' hona chahiye");
   }
 
   // Nobody gets a push when either side blocked the other, or when they muted this chat.
@@ -804,7 +822,7 @@ async function notifyPush(request, env) {
   for (const r of receivers.filter(isId)) {
     if (await fsGet(env, `blocks/${r}_${uid}`)) continue;
     if (await fsGet(env, `blocks/${uid}_${r}`)) continue;
-    if (kind !== "call") {
+    if (kind === "chat" || kind === "group") {
       const prefKey = kind === "chat" ? id : `g_${id}`;
       const pref = await fsGet(env, `users/${r}/chatPrefs/${prefKey}`);
       if (pref && pref.muted && (!pref.mutedUntil || now < pref.mutedUntil)) continue;
