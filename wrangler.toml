@@ -1,0 +1,17 @@
+name = "magicscreen-links"
+main = "src/worker.js"
+compatibility_date = "2026-10-01"
+
+# Public values (not secrets). Secrets are added with:  npx wrangler secret put NAME
+[vars]
+FIREBASE_PROJECT_ID = "magicscreen-control"
+FIREBASE_WEB_API_KEY = "AIzaSyBcbXXkrKN_fxY5XuccCrTszvhfjJn628Y"
+ANDROID_PACKAGE = "com.magicscreencontrol.app"
+# SHA-256 of the app's signing key (debug key for now). Add the release key's SHA-256 too, comma separated, before Play Store.
+ANDROID_CERT_SHA256 = "AE:89:BE:8B:C1:6D:58:81:74:6D:B7:76:23:79:B6:4A:AE:66:CA:CD:2B:2E:36:8C:39:17:56:7A:39:FB:F8:9D"
+PLAY_STORE_URL = "https://play.google.com/store/apps/details?id=com.magicscreencontrol.app"
+# Empty = use the address the request came in on. Set it to your custom domain later, e.g. https://links.yourdomain.com
+PUBLIC_BASE_URL = ""
+
+[triggers]
+crons = ["17 */6 * * *"]

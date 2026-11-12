@@ -1,0 +1,3 @@
+# Copy this file to .dev.vars (never commit .dev.vars). Used only by "npx wrangler dev".
+FIREBASE_SERVICE_ACCOUNT_JSON='{"type":"service_account","project_id":"magicscreen-control","client_email":"...","private_key":"-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"}'
+IMGBB_API_KEY=put-your-new-imgbb-key-here
