@@ -369,6 +369,35 @@ async function readJson(request) {
 
 // ---------- health check (open /api/health in a browser) ----------
 
+const CLOUD_SCOPE = "https://www.googleapis.com/auth/cloud-platform";
+
+/** Says exactly what Firestore answers for this project. Shown in /api/health, with no secrets. */
+async function firestoreHealth(env) {
+  // 1. Which databases exist in this project?
+  const cloudToken = await googleAccessToken(env, CLOUD_SCOPE);
+  const list = await fetch(`${FS_API}projects/${env.FIREBASE_PROJECT_ID}/databases`, {
+    headers: { authorization: `Bearer ${cloudToken}` },
+  });
+  const listInfo = await list.json().catch(() => ({}));
+  if (!list.ok) {
+    return `databases list error ${list.status}: ${String(listInfo.error?.message || "").slice(0, 200)}`;
+  }
+  const names = (listInfo.databases || []).map((d) => `${d.name.split("/").pop()} (${d.type || "?"})`);
+  if (!names.some((n) => n.startsWith("(default)"))) {
+    return `Project "${env.FIREBASE_PROJECT_ID}" mein (default) Firestore database nahi hai. Is project mein mile: ${names.join(", ") || "koi nahi"}. Firebase Console mein ISI project ko kholo aur Firestore Database banao.`;
+  }
+  // 2. Can the server read a document?
+  const res = await fetch(`${FS_API}${dbPath(env)}/quotas/health-check`, {
+    headers: { authorization: `Bearer ${await googleAccessToken(env)}` },
+  });
+  if (res.ok) return "ok";
+  const info = await res.json().catch(() => ({}));
+  const msg = String(info.error?.message || "");
+  // A missing document is fine: the database answered
+  if (res.status === 404 && !/database/i.test(msg)) return "ok";
+  return `error ${res.status}: ${msg.slice(0, 200)}`;
+}
+
 async function healthCheck(env) {
   const out = {
     serviceAccount: "ok",
@@ -385,19 +414,7 @@ async function healthCheck(env) {
   }
   if (token) {
     try {
-      const res = await fetch(`${FS_API}${dbPath(env)}/quotas/health-check`, {
-        headers: { authorization: `Bearer ${token}` },
-      });
-      if (!res.ok && res.status !== 404) {
-        const info = await res.json().catch(() => ({}));
-        out.firestore = `error ${res.status}: ${String(info.error?.message || "").slice(0, 200)}`;
-      } else if (res.status === 404) {
-        const info = await res.json().catch(() => ({}));
-        const msg = String(info.error?.message || "");
-        if (/database/i.test(msg) && /exist|found/i.test(msg)) {
-          out.firestore = "Firestore database nahi bana. Firebase Console > Firestore Database > Create";
-        }
-      }
+      out.firestore = await firestoreHealth(env);
     } catch (e) {
       out.firestore = e.message;
     }
