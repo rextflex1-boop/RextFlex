@@ -91,7 +91,7 @@ async function oauthFake(init) {
   );
   if (!ok) return jsonRes(400, { error: "bad signature" });
   const claims = JSON.parse(Buffer.from(c, "base64url").toString("utf8"));
-  if (claims.iss !== SA_EMAIL || !["https://www.googleapis.com/auth/datastore", "https://www.googleapis.com/auth/firebase.messaging"].includes(claims.scope)) {
+  if (claims.iss !== SA_EMAIL || !["https://www.googleapis.com/auth/datastore", "https://www.googleapis.com/auth/firebase.messaging", "https://www.googleapis.com/auth/cloud-platform"].includes(claims.scope)) {
     return jsonRes(400, { error: "bad claims" });
   }
   return jsonRes(200, { access_token: "TOKEN-OK", expires_in: 3600 });
@@ -115,6 +115,7 @@ function lookupFake(url, init) {
 }
 
 const pushed = [];
+let fakeDatabases = [{ name: "projects/magicscreen-control/databases/(default)", type: "FIRESTORE_NATIVE" }];
 function fcmFake(init) {
   const { message } = JSON.parse(init.body);
   if (message.token === "tok-dead") {
@@ -188,7 +189,13 @@ function queryFake(url, sq) {
   const coll = sq.from[0].collectionId;
   const prefix = isRoot ? `${coll}/` : `${parent}/${coll}/`;
   let rows = [];
+  const allDescendants = !!sq.from[0].allDescendants;
   for (const [path, fields] of store) {
+    if (allDescendants) {
+      const segs = path.split("/");
+      if (segs.length % 2 === 0 && segs[segs.length - 2] === coll) rows.push({ document: { name: DB + path, fields }, readTime: "t" });
+      continue;
+    }
     if (path.startsWith(prefix) && !path.slice(prefix.length).includes("/")) {
       rows.push({ document: { name: DB + path, fields }, readTime: "t" });
     }
@@ -232,6 +239,9 @@ globalThis.fetch = async (input, init = {}) => {
   if (url.hostname === "oauth2.googleapis.com") return oauthFake(init);
   if (url.hostname === "identitytoolkit.googleapis.com") return lookupFake(url, init);
   if (url.hostname === "api.imgbb.com") return imgbbFake(url, init);
+  if (url.hostname === "firestore.googleapis.com" && url.pathname.endsWith("/databases")) {
+    return jsonRes(200, { databases: fakeDatabases });
+  }
   if (url.hostname === "firestore.googleapis.com") {
     firestoreAuthSeen.push(new Headers(init.headers).get("authorization"));
     return firestoreFake(url, method, init);
@@ -570,6 +580,9 @@ test("push: a new chat message goes to the other person's phone", async () => {
   assert.equal(msg.data.title, "@alice");
   assert.equal(msg.data.body, "hello bob");
   assert.equal(msg.data.chatKey, "chat_ab");
+  assert.equal(msg.data.messageId, "mNew");
+  assert.equal(msg.data.chatId, "chat_ab");
+  assert.equal(msg.priority, "HIGH");
 });
 
 test("push: you can only announce your own message", async () => {
@@ -615,6 +628,45 @@ test("push: a token that is no longer valid is removed", async () => {
   await req("POST", "/api/notify", { token: ALICE_TOKEN, body: { kind: "chat", id: "chat_ab", messageId: "mNew" } });
   assert.ok(!store.has(`users/${BOB}/devices/dead`));
   assert.ok(store.has(`users/${BOB}/devices/d1`), "live token kept");
+});
+
+test("push: a group call start rings every other member", async () => {
+  put("groupCalls/gc_grp1", { starterUid: ALICE, starterUsername: "alice", groupName: "Study <Group>", type: "audio", status: "active", members: [ALICE, BOB], createdAtMs: Date.now() });
+  pushed.length = 0;
+  const r = await req("POST", "/api/notify", { token: ALICE_TOKEN, body: { kind: "groupcall", id: "gc_grp1" } });
+  assert.equal(r.status, 200, await r.clone().text());
+  const msg = pushed.find((p) => p.token === "tok-bob-1");
+  assert.ok(msg, "bob gets the group call push");
+  assert.equal(msg.data.type, "group_call");
+  assert.equal(msg.data.chatKey, "gc_gc_grp1");
+  assert.match(msg.data.title, /Study <Group>/);
+  assert.equal(msg.priority, "HIGH");
+});
+
+test("push: an old group call does not ring anyone", async () => {
+  put("groupCalls/gc_old1", { starterUid: ALICE, starterUsername: "alice", groupName: "Study <Group>", type: "audio", status: "active", members: [ALICE, BOB], createdAtMs: Date.now() - 600000 });
+  const r = await req("POST", "/api/notify", { token: ALICE_TOKEN, body: { kind: "groupcall", id: "gc_old1" } });
+  assert.equal(r.status, 403);
+});
+
+test("cleanup removes expired disappearing messages in chats and groups, keeps the rest", async () => {
+  put("chats/chat_ab/messages/exp1", { senderUid: ALICE, type: "text", text: "gone soon", expiresAt: Date.now() - 1000, createdAt: new Date() });
+  put("groups/grp1/messages/gexp1", { senderUid: ALICE, senderUsername: "alice", type: "text", text: "gone soon", expiresAt: Date.now() - 1000, createdAt: new Date() });
+  const result = await cleanupExpired(env);
+  assert.equal(result.messagesRemoved >= 2, true);
+  assert.ok(!store.has("chats/chat_ab/messages/exp1"), "expired chat message removed");
+  assert.ok(!store.has("groups/grp1/messages/gexp1"), "expired group message removed");
+  assert.ok(store.has("chats/chat_ab/messages/mNew"), "message without a timer kept");
+});
+
+test("health check says when the (default) database is missing from this project", async () => {
+  fakeDatabases = [{ name: "projects/magicscreen-control/databases/other", type: "FIRESTORE_NATIVE" }];
+  const r = await req("GET", "/api/health");
+  const data = await r.json();
+  fakeDatabases = [{ name: "projects/magicscreen-control/databases/(default)", type: "FIRESTORE_NATIVE" }];
+  assert.match(data.firestore, /nahi hai/);
+  assert.match(data.firestore, /other/);
+  assert.equal(data.ready, false);
 });
 
 // ---- daily limit (last, because it fills Alice's quota) ----
