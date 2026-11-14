@@ -394,7 +394,8 @@ async function firestoreHealth(env) {
   const info = await res.json().catch(() => ({}));
   const msg = String(info.error?.message || "");
   // A missing document is fine: the database answered
-  if (res.status === 404 && !/database/i.test(msg)) return "ok";
+  // A missing document is fine (the database answered). Only "does not exist" means the database is missing.
+  if (res.status === 404 && !/does not exist/i.test(msg)) return "ok";
   return `error ${res.status}: ${msg.slice(0, 200)}`;
 }
 
