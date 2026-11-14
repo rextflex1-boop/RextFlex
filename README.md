@@ -82,7 +82,7 @@ Needs a domain whose DNS is on Cloudflare. Workers & Pages > your worker > Setti
 npm test
 ```
 
-Runs 45 tests with a fake Firestore, fake Google login and fake ImgBB. The service-account JWT is really signed and verified.
+Runs 46 tests with a fake Firestore, fake Google login and fake ImgBB. The service-account JWT is really signed and verified.
 
 ## Known limits
 
