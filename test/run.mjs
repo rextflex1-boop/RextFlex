@@ -116,8 +116,15 @@ function lookupFake(url, init) {
 
 const pushed = [];
 let fakeDatabases = [{ name: "projects/magicscreen-control/databases/(default)", type: "FIRESTORE_NATIVE" }];
+let fcmBroken = false;
 function fcmFake(init) {
-  const { message } = JSON.parse(init.body);
+  const body = JSON.parse(init.body);
+  const message = body.message;
+  if (body.validate_only) {
+    if (fcmBroken) return jsonRes(403, { error: { status: "PERMISSION_DENIED", message: "Firebase Cloud Messaging API has not been used in project magicscreen-control before or it is disabled." } });
+    return jsonRes(400, { error: { status: "INVALID_ARGUMENT", message: "The registration token is not a valid FCM registration token" } });
+  }
+  if (message.token === "tok-perm") return jsonRes(403, { error: { status: "PERMISSION_DENIED", message: "Permission denied on resource" } });
   if (message.token === "tok-dead") {
     return jsonRes(404, { error: { status: "NOT_FOUND", details: [{ errorCode: "UNREGISTERED" }] } });
   }
@@ -577,8 +584,9 @@ test("push: a new chat message goes to the other person's phone", async () => {
   assert.equal((await r.json()).sent, 1);
   const msg = pushed.find((p) => p.token === "tok-bob-1");
   assert.ok(msg, "bob got a push");
-  assert.equal(msg.data.title, "@alice");
-  assert.equal(msg.data.body, "hello bob");
+  assert.equal(msg.data.title, undefined, "no title in the push");
+  assert.equal(msg.data.body, undefined, "no text in the push");
+  assert.ok(!JSON.stringify(msg.data).includes("hello bob"), "the message text never leaves the server in a push");
   assert.equal(msg.data.chatKey, "chat_ab");
   assert.equal(msg.data.messageId, "mNew");
   assert.equal(msg.data.chatId, "chat_ab");
@@ -608,7 +616,10 @@ test("push: a group message goes to the other members", async () => {
   assert.equal(r.status, 200);
   const msg = pushed.find((p) => p.token === "tok-bob-1");
   assert.ok(msg, "bob got a group push");
-  assert.match(msg.data.title, /Study <Group>/);
+  assert.equal(msg.data.title, undefined, "no title in the group push");
+  assert.equal(msg.data.body, undefined, "no text in the group push");
+  assert.equal(msg.data.groupId, "grp1");
+  assert.equal(msg.data.messageId, "gmsg1");
   assert.equal(msg.data.chatKey, "g_grp1");
 });
 
@@ -666,6 +677,24 @@ test("health check says when the (default) database is missing from this project
   fakeDatabases = [{ name: "projects/magicscreen-control/databases/(default)", type: "FIRESTORE_NATIVE" }];
   assert.match(data.firestore, /nahi hai/);
   assert.match(data.firestore, /other/);
+  assert.equal(data.ready, false);
+});
+
+test("push: a failed send is reported with the reason, not hidden", async () => {
+  put(`users/${BOB}/devices/perm`, { token: "tok-perm" });
+  const r = await req("POST", "/api/notify", { token: ALICE_TOKEN, body: { kind: "chat", id: "chat_ab", messageId: "mNew" } });
+  assert.equal(r.status, 200);
+  const data = await r.json();
+  assert.ok(data.failed >= 1, "failure counted");
+  assert.match(data.errors[0], /403/, "the reason is returned");
+  store.delete(`users/${BOB}/devices/perm`);
+});
+
+test("health: messaging says when FCM is disabled for the project", async () => {
+  fcmBroken = true;
+  const data = await (await req("GET", "/api/health")).json();
+  fcmBroken = false;
+  assert.match(data.messaging, /^error 403/);
   assert.equal(data.ready, false);
 });
 
