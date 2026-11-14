@@ -398,6 +398,20 @@ async function firestoreHealth(env) {
   return `error ${res.status}: ${msg.slice(0, 200)}`;
 }
 
+/** Asks FCM to validate a message WITHOUT sending it. Shows whether the API is enabled and this server may use it. */
+async function fcmApiHealth(env) {
+  const access = await googleAccessToken(env, MESSAGING_SCOPE);
+  const res = await fetch(`https://fcm.googleapis.com/v1/projects/${env.FIREBASE_PROJECT_ID}/messages:send`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${access}`, "content-type": "application/json" },
+    body: JSON.stringify({ validate_only: true, message: { token: "health-check-token-not-real", data: { ping: "1" } } }),
+  });
+  // FCM answered and refused only the fake token: the API is on and this server may send
+  if (res.status === 400) return "ok";
+  const info = await res.json().catch(() => ({}));
+  return `error ${res.status}: ${String(info.error?.message || "").slice(0, 200)}`;
+}
+
 async function healthCheck(env) {
   const out = {
     serviceAccount: "ok",
@@ -438,7 +452,7 @@ async function healthCheck(env) {
     out.webApiKey = e.message;
   }
   try {
-    await googleAccessToken(env, MESSAGING_SCOPE);
+    out.messaging = await fcmApiHealth(env);
   } catch (e) {
     out.messaging = e.message;
   }
@@ -749,19 +763,14 @@ async function sendPush(env, token, data, urgent) {
     headers: { authorization: `Bearer ${access}`, "content-type": "application/json" },
     body: JSON.stringify({ message: { token, data, android: { priority: urgent ? "HIGH" : "NORMAL", ttl: "60s" } } }),
   });
-  if (res.ok) return "ok";
+  if (res.ok) return { result: "ok" };
   const info = await res.json().catch(() => ({}));
   const errorCode = info.error?.details?.[0]?.errorCode || "";
-  if (res.status === 404 || errorCode === "UNREGISTERED") return "gone";
-  return "fail";
-}
-
-/** Short preview for a message push. Photos, voice and locations show only their type. */
-function previewOf(msg) {
-  if (msg.type === "photo") return "📷 Photo";
-  if (msg.type === "voice") return "🎤 Voice message";
-  if (msg.type === "location") return "📍 Location";
-  return String(msg.text || "").slice(0, 120) || "Naya message";
+  if (res.status === 404 || errorCode === "UNREGISTERED") return { result: "gone" };
+  return {
+    result: "fail",
+    error: `${res.status} ${info.error?.status || ""}: ${String(info.error?.message || "").slice(0, 160)}`,
+  };
 }
 
 /**
@@ -788,7 +797,7 @@ async function notifyPush(request, env) {
     receivers = chat.participants.filter((p) => p !== uid);
     const sender = await fsGet(env, `users/${uid}`);
     urgent = true;
-    payload = { type: "message", title: `@${(sender && sender.username) || "user"}`, body: previewOf(msg), chatKey: id, lockKey: `u_${uid}`, chatId: id, messageId };
+    payload = { type: "message", chatKey: id, lockKey: `u_${uid}`, chatId: id, messageId };
   } else if (kind === "group") {
     if (!id || !messageId) throw new HttpError(400, "id aur messageId chahiye");
     const group = await fsGet(env, `groups/${id}`);
@@ -799,10 +808,10 @@ async function notifyPush(request, env) {
     urgent = true;
     payload = {
       type: "message",
-      title: `${group.name || "Group"} · @${String(msg.senderUsername || "user").slice(0, 40)}`,
-      body: previewOf(msg),
       chatKey: `g_${id}`,
       lockKey: `g_${id}`,
+      groupId: id,
+      messageId,
     };
   } else if (kind === "call") {
     if (!id) throw new HttpError(400, "call id chahiye");
@@ -848,16 +857,20 @@ async function notifyPush(request, env) {
   }
 
   let sent = 0;
+  const failures = [];
   for (const r of allowed) {
     const devices = await fsFind(env, `users/${r}`, "devices", []);
     for (const dev of devices) {
       if (!dev.token) continue;
-      const result = await sendPush(env, dev.token, payload, urgent);
-      if (result === "ok") sent++;
-      if (result === "gone") await fsDeleteAll(env, [dev.path]);
+      const outcome = await sendPush(env, dev.token, payload, urgent);
+      if (outcome.result === "ok") sent++;
+      if (outcome.result === "gone") await fsDeleteAll(env, [dev.path]);
+      if (outcome.result === "fail") failures.push(outcome.error);
     }
   }
-  return json(200, { sent });
+  const summary = { sent, failed: failures.length, errors: failures.slice(0, 3) };
+  console.log(JSON.stringify({ notify: kind, ...summary }));
+  return json(200, summary);
 }
 
 // ---------- API ----------
