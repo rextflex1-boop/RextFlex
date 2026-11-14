@@ -82,7 +82,7 @@ Needs a domain whose DNS is on Cloudflare. Workers & Pages > your worker > Setti
 npm test
 ```
 
-Runs 43 tests with a fake Firestore, fake Google login and fake ImgBB. The service-account JWT is really signed and verified.
+Runs 45 tests with a fake Firestore, fake Google login and fake ImgBB. The service-account JWT is really signed and verified.
 
 ## Known limits
 
@@ -99,3 +99,8 @@ Runs 43 tests with a fake Firestore, fake Google login and fake ImgBB. The servi
 - Cron job every 6 hours removes expired shared chats and quota counters older than 2 days.
 - Cloudflare rate limit rule (dashboard > Security > WAF > Rate limiting rules) for `/api/*` is still recommended on top of these checks.
 - Push notifications: FCM HTTP v1 from this server (service account). Tokens are stored under users/{uid}/devices. Invalid tokens are removed automatically.
+
+## Notification check (this build)
+
+- `/api/health` `messaging` now asks FCM to validate a message without sending it. `ok` means FCM is enabled and this server may send. An `error 403` means the Firebase Cloud Messaging API is off or not allowed for the project.
+- `POST /api/notify` returns `sent`, `failed` and the first reasons in `errors`, and logs the same line to Cloudflare Logs.
