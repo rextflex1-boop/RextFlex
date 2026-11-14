@@ -698,6 +698,13 @@ test("health: messaging says when FCM is disabled for the project", async () => 
   assert.equal(data.ready, false);
 });
 
+test("health: a missing document is fine, a missing database is reported", async () => {
+  // the test fake answers any unknown document with 404 NOT_FOUND (no message), which the real service also does
+  const ok = await (await req("GET", "/api/health")).json();
+  assert.equal(ok.firestore, "ok");
+  assert.equal(ok.ready, true);
+});
+
 // ---- daily limit (last, because it fills Alice's quota) ----
 test("daily share limit stops abuse with 429", async () => {
   const day = new Date().toISOString().slice(0, 10).replace(/-/g, "");
